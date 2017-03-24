@@ -840,7 +840,7 @@ struct tcp_skb_cb {
 	};
 
 #ifdef CONFIG_MPTCP
-	__u8		mptcp_flags;	/* flags for the MPTCP layer    */
+	__u16		mptcp_flags;	/* flags for the MPTCP layer    */
 	__u8		dss_off;	/* Number of 4-byte words until
 					 * seq-number */
 #endif
@@ -873,6 +873,7 @@ struct tcp_skb_cb {
 		};
 #endif
 	};
+	struct mptcp_fec_data	*fec;		/* FEC parameters		*/
 };
 
 #define TCP_SKB_CB(__skb)	((struct tcp_skb_cb *)&((__skb)->cb[0]))

@@ -1174,6 +1174,7 @@ static int mptcp_alloc_mpcb(struct sock *meta_sk, __u64 remote_key, u32 window)
 	mptcp_debug("%s: created mpcb with token %#x\n",
 		    __func__, mpcb->mptcp_loc_token);
 
+	mptcp_init_fec(&mpcb->fec, meta_tp->write_seq);
 	return 0;
 }
 
@@ -1585,6 +1586,8 @@ void mptcp_close(struct sock *meta_sk, long timeout)
 
 	mptcp_debug("%s: Close of meta_sk with tok %#x\n",
 		    __func__, mpcb->mptcp_loc_token);
+
+	clear_all_fec_queue(mpcb);
 
 	mutex_lock(&mpcb->mpcb_mutex);
 	lock_sock(meta_sk);

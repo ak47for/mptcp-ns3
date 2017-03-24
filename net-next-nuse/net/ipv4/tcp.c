@@ -1704,6 +1704,12 @@ int tcp_recvmsg(struct sock *sk, struct msghdr *msg, size_t len, int nonblock,
 			/* Now that we have two receive queues this
 			 * shouldn't happen.
 			 */
+
+			//printk("===>>>> @%p %u User read it !!\n", skb, TCP_SKB_CB(skb)->seq);
+			if(mptcp_recover_is_ok(skb)){
+				MPTCP_FEC_DEBUG("US-READ %p %u \n", skb, TCP_SKB_CB(skb)->seq);
+			}
+
 			if (WARN(before(*seq, TCP_SKB_CB(skb)->seq),
 				 "recvmsg bug: copied %X seq %X rcvnxt %X fl %X\n",
 				 *seq, TCP_SKB_CB(skb)->seq, tp->rcv_nxt,

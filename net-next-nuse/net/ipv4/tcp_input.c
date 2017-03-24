@@ -4515,6 +4515,99 @@ err:
 	return -ENOMEM;
 }
 
+///CG add begin
+//Borrow from mptcp_input.c
+
+/* @return: 0  everything is fine. Just continue processing
+ *	    1  subflow is broken stop everything
+ *	    -1 this packet was broken - continue with the next one.
+ */
+int rmt_mptcp_prevalidate_skb(struct sock *sk, struct sk_buff *skb)
+{
+	struct tcp_sock *tp = tcp_sk(sk);
+	struct mptcp_cb *mpcb = tp->mpcb;
+
+	/* If we are in infinite mode, the subflow-fin is in fact a data-fin. */
+	if (!skb->len && (TCP_SKB_CB(skb)->tcp_flags & TCPHDR_FIN) &&
+	    !mptcp_is_data_fin(skb) && !mpcb->infinite_mapping_rcv) {
+		__kfree_skb(skb);
+		return -1;
+	}
+
+	/* If we are not yet fully established and do not know the mapping for
+	 * this segment, this path has to fallback to infinite or be torn down.
+	 */
+	if (!tp->mptcp->fully_established && !mptcp_is_data_seq(skb) &&
+	    !tp->mptcp->mapping_present && !mpcb->infinite_mapping_rcv) {
+		__kfree_skb(skb);
+		return -1;
+	}
+
+	return 0;
+}
+
+int rmt_mptcp_set_mapping(struct sk_buff *skb, const struct sock *sk)
+{
+	const struct tcp_sock *tp = tcp_sk(sk);
+	struct tcp_skb_cb *tcb = TCP_SKB_CB(skb);
+	//struct tcp_sock *meta_tp = mptcp_meta_tp(tp);
+	struct mptcp_cb *mpcb = tp->mpcb;
+	u32 *ptr;
+	u32 data_seq, sub_seq, data_len;
+	u32 inc = 0, end_seq = tcb->end_seq;
+
+	if(!mptcp_is_data_seq(skb))
+	{
+		// printk(KERN_EMERG "rmt_mptcp_set_mapping: no mapping in this skb\n");
+		return -1;
+	}
+
+	ptr = mptcp_skb_set_data_seq(skb, &data_seq, mpcb);
+	ptr++;
+	sub_seq = get_unaligned_be32(ptr) + tp->mptcp->rcv_isn;
+	ptr++;
+	data_len = get_unaligned_be16(ptr);
+
+	if(data_len<skb->len)
+	{
+		// printk(KERN_EMERG "rmt_mptcp_set_mapping: data_len = %u , skb->len = %u\n",data_len,skb->len);
+		return -1;
+	}
+
+	if (TCP_SKB_CB(skb)->tcp_flags & TCPHDR_FIN)
+		end_seq--;
+	/* If skb is the end of this mapping (end is always at mapping-boundary
+	 * thanks to the splitting/trimming), then we need to increase
+	 * data-end-seq by 1 if this here is a data-fin.
+	 *
+	 * We need to do -1 because end_seq includes the subflow-FIN.
+	 */
+	if (tp->mptcp->map_data_fin &&
+	    end_seq == tp->mptcp->map_subseq + tp->mptcp->map_data_len) {
+		inc = 1;
+
+		/* We manually set the fin-flag if it is a data-fin. For easy
+		 * processing in tcp_recvmsg.
+		 */
+		TCP_SKB_CB(skb)->tcp_flags |= TCPHDR_FIN;
+	} else {
+		/* We may have a subflow-fin with data but without data-fin */
+		TCP_SKB_CB(skb)->tcp_flags &= ~TCPHDR_FIN;
+	}
+
+	/* Adapt data-seq's to the packet itself. We kinda transform the
+	 * dss-mapping to a per-packet granularity. This is necessary to
+	 * correctly handle overlapping mappings coming from different
+	 * subflows. Otherwise it would be a complete mess.
+	 */
+	tcb->seq = data_seq;
+	tcb->end_seq = tcb->seq + skb->len + inc;
+
+	return 0;
+}
+
+//CG add end
+
 static void tcp_data_queue(struct sock *sk, struct sk_buff *skb)
 {
 	struct tcp_sock *tp = tcp_sk(sk);
@@ -4570,6 +4663,14 @@ queue_and_out:
 			eaten = tcp_queue_rcv(sk, skb, 0, &fragstolen);
 		}
 		tcp_rcv_nxt_update(tp, TCP_SKB_CB(skb)->end_seq);
+#if 0
+		if(mptcp(tp) && eaten > 0 && is_meta_sk(sk) ){
+			MPTCP_FEC_DEBUG("eaten>0 we try to clear byseq.\n");
+			//if( clear_skb_byseq(sk, tp->rcv_nxt) != tp->rcv_nxt)
+			mptcp_fec_update_queue(sk, skb);
+		}
+#endif
+
 		if (skb->len || mptcp_is_data_fin(skb))
 			tcp_event_data_recv(sk, skb);
 		if (TCP_SKB_CB(skb)->tcp_flags & TCPHDR_FIN)
@@ -4597,7 +4698,7 @@ queue_and_out:
 			 * we may be about to receive a data-fin, which still
 			 * must get queued.
 			 */
-			sk->sk_data_ready(sk);
+			sk->sk_data_ready(sk);		//mptcp_data_ready  , sock_def_readable
 		return;
 	}
 
@@ -4637,6 +4738,66 @@ drop:
 	}
 
 	tcp_data_queue_ofo(sk, skb);
+
+	//CG add    immediately add every ofo skb in each sub-flow to the meta level ofo queue.
+	if(mptcp(tp))
+	{
+		if(skb!=NULL && !mptcp_fec_is_encoded(skb))	//sysctl_mptcp_receive_ofo_optimize &&
+		{
+			///Clone skb!!!!!!!!!
+			struct sk_buff *clone_skb;
+			clone_skb = skb_copy(skb, GFP_ATOMIC);
+
+			if(clone_skb==NULL)
+			{
+				// printk(KERN_EMERG "^^^^^ mptcp_add_meta_ofo_queue clone_skb failed ^^^^^\n");
+				goto rmt_end_print;
+			}
+
+			//clone_skb->ifProtectionPacket=1;
+
+			/* Pre-validation - e.g., early fallback */
+			if(rmt_mptcp_prevalidate_skb(sk, clone_skb) != 0)
+			{
+				// printk(KERN_EMERG "^^^^^ mptcp_add_meta_ofo_queue clone_skb: rmt_mptcp_prevalidate_skb failed ^^^^^\n");
+				goto rmt_end_print;
+			}
+
+			/* Set the current mapping */
+			if(rmt_mptcp_set_mapping(clone_skb,sk) != 0)
+			{
+				// printk(KERN_EMERG "^^^^^ mptcp_add_meta_ofo_queue clone_skb: rmt_mptcp_set_mapping failed ^^^^^\n");
+				goto rmt_end_print;
+			}
+
+			/* Push a level higher */
+			if (!(tp->mpcb->in_time_wait) && clone_skb) /* In time-wait, do not receive data */
+			{
+				// printk(KERN_EMERG "^^^^^ mptcp_add_meta_ofo_queue clone_skb: data level seq = %u , end_seq = %u, len = %u ^^^^^\n"
+				// 	,TCP_SKB_CB(clone_skb)->seq,TCP_SKB_CB(clone_skb)->end_seq,TCP_SKB_CB(clone_skb)->end_seq-TCP_SKB_CB(clone_skb)->seq);
+
+				mptcp_add_meta_ofo_queue(mptcp_meta_sk(sk), clone_skb, sk);
+				/* Check if this fills a gap in the ofo queue */
+				if (!skb_queue_empty(&mptcp_meta_tp(tp)->out_of_order_queue))
+					mptcp_ofo_queue(sk);
+
+				/*
+				*	try to recovery now.
+				*/
+				//MPTCP_FEC_DEBUG("sub-socket ofo queue, try to recovery now!\n");
+				mptcp_fec_process_queue(mptcp_meta_sk(sk));
+			}
+			else
+			{
+				// printk(KERN_EMERG "^^^^^ mptcp_add_meta_ofo_queue clone_skb: !mpcb->in_time_wait=%d clone_skb=%d ^^^^^\n",!(tp->mpcb->in_time_wait),clone_skb);
+			}
+
+rmt_end_print:
+			if(!clone_skb)
+				__kfree_skb(clone_skb);
+		}
+
+	}
 }
 
 static struct sk_buff *tcp_collapse_one(struct sock *sk, struct sk_buff *skb,
@@ -5165,6 +5326,9 @@ static bool tcp_validate_incoming(struct sock *sk, struct sk_buff *skb,
 		/* Reset is accepted even if it did not pass PAWS. */
 	}
 
+	if(mptcp(tcp_sk(sk)) && mptcp_fec_is_encoded(skb) && !is_meta_sk(sk))
+		mptcp_try_fec_skb_enqueue(sk, skb);
+
 	/* Step 1: check sequence number */
 	if (!tcp_sequence(tp, TCP_SKB_CB(skb)->seq, TCP_SKB_CB(skb)->end_seq)) {
 		/* RFC793, page 37: "In all states except SYN-SENT, all reset
@@ -5214,7 +5378,7 @@ syn_challenge:
 	}
 
 	/* If valid: post process the received MPTCP options. */
-	if (mptcp(tp) && mptcp_handle_options(sk, th, skb))
+	if (mptcp(tp) && !mptcp_fec_is_encoded(skb) && mptcp_handle_options(sk, th, skb))
 		goto discard;
 
 	return true;
@@ -5404,6 +5568,10 @@ void tcp_rcv_established(struct sock *sk, struct sk_buff *skb,
 no_ack:
 			if (eaten)
 				kfree_skb_partial(skb, fragstolen);
+			/*
+			*	mptcp_data_ready
+			*	sock_def_readable
+			*/
 			sk->sk_data_ready(sk);
 			return;
 		}

@@ -988,13 +988,16 @@ static int mptcp_queue_skb(struct sock *sk)
 			meta_tp->rcv_nxt = TCP_SKB_CB(tmp1)->end_seq;
 			mptcp_check_rcvseq_wrap(meta_tp, old_rcv_nxt);
 
+			if(!is_meta_sk(sk))
+				mptcp_fec_update_queue(meta_sk, tmp1);
+
 			if ((TCP_SKB_CB(tmp1)->tcp_flags & TCPHDR_FIN) &&
 			    !mpcb->in_time_wait)
 				mptcp_fin(meta_sk);
 
 			/* Check if this fills a gap in the ofo queue */
 			if (!skb_queue_empty(&meta_tp->out_of_order_queue))
-				mptcp_ofo_queue(meta_sk);
+				mptcp_ofo_queue(sk);
 
 			if (eaten)
 				kfree_skb_partial(tmp1, fragstolen);
@@ -1010,6 +1013,10 @@ next:
 
 	inet_csk(meta_sk)->icsk_ack.lrcvtime = tcp_time_stamp;
 	mptcp_reset_mapping(tp, old_copied_seq);
+
+
+	/* try to recovery now.	*/
+	mptcp_fec_process_queue(sk);
 
 	return data_queued ? -1 : -2;
 }
@@ -1039,6 +1046,15 @@ restart:
 	 */
 	skb_queue_walk_safe(&sk->sk_receive_queue, skb, tmp) {
 		int ret;
+
+		if(mptcp_fec_is_encoded(skb)){
+			//MPTCP_FEC_DEBUG("here drop fec-skb tcp-seq:%u !!\n", TCP_SKB_CB(skb)->seq);
+			tcp_sk(sk)->copied_seq = TCP_SKB_CB(skb)->end_seq;
+			__skb_unlink(skb, &sk->sk_receive_queue);
+			kfree_skb(skb);
+			continue;
+		}
+
 		/* Pre-validation - e.g., early fallback */
 		ret = mptcp_prevalidate_skb(sk, skb);
 		if (ret < 0)
@@ -1724,9 +1740,9 @@ void mptcp_parse_options(const uint8_t *ptr, int opsize,
 			}
 		}
 
-		tcb->dss_off = (ptr - skb_transport_header(skb));
+		tcb->dss_off = (ptr - skb_transport_header(skb));///偏移直接指向 dss
 
-		if (mdss->M) {
+		if (mdss->M || mdss->f ) {
 			if (mdss->m) {
 				u64 data_seq64 = get_unaligned_be64(ptr);
 
@@ -1737,10 +1753,14 @@ void mptcp_parse_options(const uint8_t *ptr, int opsize,
 			} else {
 				mopt->data_seq = get_unaligned_be32(ptr);
 				ptr += 8; /* 32-bit dseq + subseq */
+
 			}
 			mopt->data_len = get_unaligned_be16(ptr);
 
-			tcb->mptcp_flags |= MPTCPHDR_SEQ;
+			if(!mdss->f)
+				tcb->mptcp_flags |= MPTCPHDR_SEQ;
+			else
+				tcb->mptcp_flags |= MPTCPHDR_FEC;
 
 			/* Is a check-sum present? */
 			if (opsize == mptcp_sub_len_dss(mdss, 1))

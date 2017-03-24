@@ -1255,7 +1255,12 @@ int tcp_fragment(struct sock *sk, struct sk_buff *skb, u32 len,
 
 	/* Link BUFF into the send queue. */
 	__skb_header_release(buff);
-	tcp_insert_write_queue_after(skb, buff, sk);
+
+	if(mptcp_fec_is_encoded(skb)){
+		skb_queue_fec(tcp_sk(tp->meta_sk)->mpcb, skb, buff);
+	}else{
+		tcp_insert_write_queue_after(skb, buff, sk);
+	}
 
 	return 0;
 }

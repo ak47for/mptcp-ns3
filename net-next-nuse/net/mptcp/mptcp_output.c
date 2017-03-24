@@ -35,6 +35,7 @@
 #include <net/mptcp_v4.h>
 #include <net/mptcp_v6.h>
 #include <net/sock.h>
+#include <net/mptcp_fec.h>
 
 static const int mptcp_dss_len = MPTCP_SUB_LEN_DSS_ALIGN +
 				 MPTCP_SUB_LEN_ACK_ALIGN +
@@ -309,19 +310,34 @@ static int mptcp_write_dss_mapping(const struct tcp_sock *tp, const struct sk_bu
 	const struct tcp_skb_cb *tcb = TCP_SKB_CB(skb);
 	__be32 *start = ptr;
 	__u16 data_len;
+	struct mptcp_fec_st *fec ;
 
 	*ptr++ = htonl(tcb->seq); /* data_seq */
 
 	/* If it's a non-data DATA_FIN, we set subseq to 0 (draft v7) */
 	if (mptcp_is_data_fin(skb) && skb->len == 0)
 		*ptr++ = 0; /* subseq */
-	else
-		*ptr++ = htonl(tp->write_seq - tp->mptcp->snt_isn); /* subseq */
+	else{
+
+		if(mptcp_fec_is_encoded(skb)){
+			*ptr++ = htonl(tcb->fec->max_mss); /* subseq */
+		}else{
+			if(!tp->mptcp){/*meta*/
+				*ptr++ = 1;
+			}else
+				*ptr++ = htonl(tp->write_seq - tp->mptcp->snt_isn); /* subseq */
+		}
+	}
 
 	if (tcb->mptcp_flags & MPTCPHDR_INF)
 		data_len = 0;
-	else
-		data_len = tcb->end_seq - tcb->seq;
+	else{
+		if(mptcp_fec_is_encoded(skb)){
+			data_len = tcb->fec->enc_len;
+		}else{
+			data_len = tcb->end_seq - tcb->seq;
+		}
+	}
 
 	if (tp->mpcb->dss_csum && data_len) {
 		__be16 *p16 = (__be16 *)ptr;
@@ -358,6 +374,7 @@ static int mptcp_write_dss_data_ack(const struct tcp_sock *tp, const struct sk_b
 	mdss->M = mptcp_is_data_seq(skb) ? 1 : 0;
 	mdss->a = 0;
 	mdss->A = 1;
+	mdss->f = mptcp_fec_is_encoded(skb)? 1 : 0;
 	mdss->len = mptcp_sub_len_dss(mdss, tp->mpcb->dss_csum);
 	ptr++;
 
@@ -384,7 +401,10 @@ static void mptcp_save_dss_data_seq(const struct tcp_sock *tp, struct sk_buff *s
 	struct tcp_skb_cb *tcb = TCP_SKB_CB(skb);
 	__be32 *ptr = (__be32 *)tcb->dss;
 
-	tcb->mptcp_flags |= MPTCPHDR_SEQ;
+	if(mptcp_fec_is_encoded(skb)){
+		tcb->mptcp_flags |= MPTCPHDR_FEC | MPTCPHDR_SEQ;
+	}else
+		tcb->mptcp_flags |= MPTCPHDR_SEQ;
 
 	ptr += mptcp_write_dss_data_ack(tp, skb, ptr);
 	ptr += mptcp_write_dss_mapping(tp, skb, ptr);
@@ -425,6 +445,7 @@ static bool mptcp_skb_entail(struct sock *sk, struct sk_buff *skb, int reinject)
 	if (!subskb)
 		return false;
 
+
 	/* At the subflow-level we need to call again tcp_init_tso_segs. We
 	 * force this, by setting gso_segs to 0. It has been set to 1 prior to
 	 * the call to mptcp_skb_entail.
@@ -453,6 +474,7 @@ static bool mptcp_skb_entail(struct sock *sk, struct sk_buff *skb, int reinject)
 	if (mptcp_is_data_fin(subskb))
 		mptcp_combine_dfin(subskb, meta_sk, sk);
 
+	//TCP_SKB_CB(subskb)->fec = TCP_SKB_CB(skb)->fec;
 	mptcp_save_dss_data_seq(tp, subskb);
 
 	tcb->seq = tp->write_seq;
@@ -504,7 +526,7 @@ static int mptcp_fragment(struct sock *meta_sk, struct sk_buff *skb, u32 len,
 {
 	int ret, diff, old_factor;
 	struct sk_buff *buff;
-	u8 flags;
+	typeof(TCP_SKB_CB(skb)->mptcp_flags) flags;
 
 	if (skb_headlen(skb) < len)
 		diff = skb->len - len;
@@ -533,7 +555,19 @@ static int mptcp_fragment(struct sock *meta_sk, struct sk_buff *skb, u32 len,
 	 * undo the changes done by tcp_fragment and update the
 	 * reinject queue. Also, undo changes to the packet counters.
 	 */
-	if (reinject == 1) {
+	if(mptcp_fec_is_encoded(skb)){
+		struct mptcp_fec_data *fec;
+		int undo = buff->truesize - diff;
+		meta_sk->sk_wmem_queued -= undo;
+		sk_mem_uncharge(meta_sk, undo);
+
+		fec = kmalloc(sizeof(*fec), GFP_ATOMIC);
+		if(fec){
+			memcpy(fec, TCP_SKB_CB(skb)->fec, sizeof(*fec));
+			TCP_SKB_CB(buff)->fec = fec;
+		}
+
+	}else if (reinject == 1) {
 		int undo = buff->truesize - diff;
 		meta_sk->sk_wmem_queued -= undo;
 		sk_mem_uncharge(meta_sk, undo);
@@ -637,20 +671,37 @@ window_probe:
 bool mptcp_write_xmit(struct sock *meta_sk, unsigned int mss_now, int nonagle,
 		     int push_one, gfp_t gfp)
 {
-	struct tcp_sock *meta_tp = tcp_sk(meta_sk), *subtp;
+	struct tcp_sock *meta_tp = tcp_sk(meta_sk), *subtp;  //mptcp_meta_specific
 	struct sock *subsk = NULL;
 	struct mptcp_cb *mpcb = meta_tp->mpcb;
-	struct sk_buff *skb;
+	struct sk_buff *skb, *fskb = NULL, *tmp=NULL;
 	int reinject = 0;
 	unsigned int sublimit;
 	__u32 path_mask = 0;
+	struct sk_buff_head *fec_head;
 
+	fskb = mptcp_fec_create(meta_sk, &meta_sk->sk_write_queue);
+	if(fskb)
+		skb_queue_fec(mpcb, NULL, fskb);
+
+	//mptcp_sched_default
+	//mptcp_sched_rr
 	while ((skb = mpcb->sched_ops->next_segment(meta_sk, &reinject, &subsk,
 						    &sublimit))) {
 		unsigned int limit;
 
 		subtp = tcp_sk(subsk);
 		mss_now = tcp_current_mss(subsk);
+
+do_data_skb:
+		fskb = peek_skb_frm_snd_fec_queue(meta_sk, mpcb);
+		if(fskb){
+			if(!tmp)
+				tmp = skb;
+			skb = fskb;
+		}else if(tmp){
+			skb = tmp;
+		}
 
 		if (reinject == 1) {
 			if (!after(TCP_SKB_CB(skb)->end_seq, meta_tp->snd_una)) {
@@ -660,7 +711,6 @@ bool mptcp_write_xmit(struct sock *meta_sk, unsigned int mss_now, int nonagle,
 				continue;
 			}
 		}
-
 		/* If the segment was cloned (e.g. a meta retransmission),
 		 * the header must be expanded/copied so that there is no
 		 * corruption of TSO information.
@@ -687,6 +737,7 @@ bool mptcp_write_xmit(struct sock *meta_sk, unsigned int mss_now, int nonagle,
 		 * subject to the MPTCP-level. It is based on the properties of
 		 * the subflow, not the MPTCP-level.
 		 */
+
 		if (unlikely(!tcp_nagle_test(meta_tp, skb, mss_now,
 					     (tcp_skb_is_last(meta_sk, skb) ?
 					      nonagle : TCP_NAGLE_PUSH))))
@@ -718,23 +769,36 @@ bool mptcp_write_xmit(struct sock *meta_sk, unsigned int mss_now, int nonagle,
 		    unlikely(mptcp_fragment(meta_sk, skb, limit, gfp, reinject)))
 			break;
 
-		if (!mptcp_skb_entail(subsk, skb, reinject))
+		if (!mptcp_skb_entail(subsk, skb, reinject)){
+			if(mptcp_fec_is_encoded(skb))
+				free_fec_skb(meta_sk, skb);
 			break;
+		}
+
 		/* Nagle is handled at the MPTCP-layer, so
 		 * always push on the subflow
 		 */
 		__tcp_push_pending_frames(subsk, mss_now, TCP_NAGLE_PUSH);
 		path_mask |= mptcp_pi_to_flag(subtp->mptcp->path_index);
-		skb_mstamp_get(&skb->skb_mstamp);
 
-		if (!reinject) {
-			mptcp_check_sndseq_wrap(meta_tp,
-						TCP_SKB_CB(skb)->end_seq -
-						TCP_SKB_CB(skb)->seq);
-			tcp_event_new_data_sent(meta_sk, skb);
+		if(!mptcp_fec_is_encoded(skb)){
+			skb_mstamp_get(&skb->skb_mstamp);
+
+			if (!reinject ) {
+				mptcp_check_sndseq_wrap(meta_tp,
+							TCP_SKB_CB(skb)->end_seq -
+							TCP_SKB_CB(skb)->seq);
+				tcp_event_new_data_sent(meta_sk, skb);
+			}
+
+			tcp_minshall_update(meta_tp, mss_now, skb);
+		}else{
+			MPTCP_FEC_DEBUG("fec-skb enc_seq=%u enc_len=%u\n",
+				TCP_SKB_CB(skb)->fec->enc_seq,
+				TCP_SKB_CB(skb)->fec->enc_len);
+			free_fec_skb(meta_sk, skb);
+			goto do_data_skb;
 		}
-
-		tcp_minshall_update(meta_tp, mss_now, skb);
 
 		if (reinject > 0) {
 			__skb_unlink(skb, &mpcb->reinject_queue);
@@ -969,7 +1033,7 @@ void mptcp_established_options(struct sock *sk, struct sk_buff *skb,
 		/* If !skb, we come from tcp_current_mss and thus we always
 		 * assume that the DSS-option will be set for the data-packet.
 		 */
-		if (skb && !mptcp_is_data_seq(skb)) {
+		if (skb && (!mptcp_is_data_seq(skb)&& !mptcp_fec_is_encoded(skb)) ) {
 			*size += MPTCP_SUB_LEN_ACK_ALIGN;
 		} else {
 			/* Doesn't matter, if csum included or not. It will be
@@ -1144,7 +1208,7 @@ void mptcp_options_write(__be32 *ptr, struct tcp_sock *tp,
 	}
 
 	if (OPTION_DATA_ACK & opts->mptcp_options) {
-		if (!mptcp_is_data_seq(skb))
+		if (!mptcp_is_data_seq(skb) && !mptcp_fec_is_encoded(skb))
 			ptr += mptcp_write_dss_data_ack(tp, skb, ptr);
 		else
 			ptr += mptcp_write_dss_data_seq(tp, skb, ptr);

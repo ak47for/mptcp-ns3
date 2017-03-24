@@ -185,12 +185,14 @@ static void try_shortcut(struct sk_buff *shortcut, struct sk_buff *skb,
 
 	/* Do skb overlap to previous one? */
 	if (skb1 && before(seq, TCP_SKB_CB(skb1)->end_seq)) {
+
 		if (!after(end_seq, TCP_SKB_CB(skb1)->end_seq)) {
 			/* All the bits are present. */
 			__kfree_skb(skb);
 			skb = NULL;
 			goto end;
 		}
+
 		if (seq == TCP_SKB_CB(skb1)->seq) {
 			if (skb_queue_is_first(head, skb1))
 				skb1 = NULL;
@@ -198,6 +200,7 @@ static void try_shortcut(struct sk_buff *shortcut, struct sk_buff *skb,
 				skb1 = skb_queue_prev(head, skb1);
 		}
 	}
+
 	if (!skb1)
 		__skb_queue_head(head, skb);
 	else
@@ -218,7 +221,8 @@ static void try_shortcut(struct sk_buff *shortcut, struct sk_buff *skb,
 end:
 	if (skb) {
 		skb_set_owner_r(skb, meta_sk);
-		tp->mptcp->shortcut_ofoqueue = skb;
+		if(tp->mptcp)
+			tp->mptcp->shortcut_ofoqueue = skb;
 	}
 
 	return;
@@ -230,9 +234,14 @@ end:
 void mptcp_add_meta_ofo_queue(const struct sock *meta_sk, struct sk_buff *skb,
 			      struct sock *sk)
 {
+
 	struct tcp_sock *tp = tcp_sk(sk);
 
-	try_shortcut(tp->mptcp->shortcut_ofoqueue, skb,
+	if(is_meta_sk(sk))
+		try_shortcut(NULL, skb,
+		     &tcp_sk(meta_sk)->out_of_order_queue, tp);
+	else
+		try_shortcut(tp->mptcp->shortcut_ofoqueue, skb,
 		     &tcp_sk(meta_sk)->out_of_order_queue, tp);
 }
 
@@ -253,13 +262,15 @@ bool mptcp_prune_ofo_queue(struct sock *sk)
 	return res;
 }
 
-void mptcp_ofo_queue(struct sock *meta_sk)
+void mptcp_ofo_queue(struct sock *sk)
 {
+	struct sock *meta_sk = mptcp_meta_sk(sk);
 	struct tcp_sock *meta_tp = tcp_sk(meta_sk);
 	struct sk_buff *skb;
 
 	while ((skb = skb_peek(&meta_tp->out_of_order_queue)) != NULL) {
 		u32 old_rcv_nxt = meta_tp->rcv_nxt;
+
 		if (after(TCP_SKB_CB(skb)->seq, meta_tp->rcv_nxt))
 			break;
 
@@ -273,8 +284,17 @@ void mptcp_ofo_queue(struct sock *meta_sk)
 		__skb_unlink(skb, &meta_tp->out_of_order_queue);
 		mptcp_remove_shortcuts(meta_tp->mpcb, skb);
 
+		//added by GJM.
+		if(mptcp_recover_is_ok(skb))
+			MPTCP_FEC_DEBUG("OFO->RCV :%p  %u\n", skb, TCP_SKB_CB(skb)->seq);
+
 		__skb_queue_tail(&meta_sk->sk_receive_queue, skb);
 		meta_tp->rcv_nxt = TCP_SKB_CB(skb)->end_seq;
+
+		if(!is_meta_sk(sk) && !mptcp_fec_is_encoded(skb) && !mptcp_recover_is_ok(skb))
+			mptcp_fec_update_queue(meta_sk, skb);
+
+
 		mptcp_check_rcvseq_wrap(meta_tp, old_rcv_nxt);
 
 		if (TCP_SKB_CB(skb)->tcp_flags & TCPHDR_FIN)

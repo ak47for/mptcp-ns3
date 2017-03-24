@@ -2,6 +2,7 @@
 
 #include <linux/module.h>
 #include <net/mptcp.h>
+#include <net/mptcp_fec.h>
 
 static DEFINE_SPINLOCK(mptcp_sched_list_lock);
 static LIST_HEAD(mptcp_sched_list);
@@ -353,6 +354,11 @@ static struct sk_buff *__mptcp_next_segment(struct sock *meta_sk, int *reinject)
 
 	*reinject = 0;
 
+#if 0
+	skb = peek_skb_frm_snd_fec_queue(meta_sk, mpcb);
+	if(skb)
+		return skb;
+#endif
 	/* If we are in fallback-mode, just take from the meta-send-queue */
 	if (mpcb->infinite_mapping_snd || mpcb->send_infinite_mapping)
 		return tcp_send_head(meta_sk);
@@ -400,6 +406,7 @@ static struct sk_buff *mptcp_next_segment(struct sock *meta_sk,
 	*subsk = get_available_subflow(meta_sk, skb, false);
 	if (!*subsk)
 		return NULL;
+
 
 	subtp = tcp_sk(*subsk);
 	mss_now = tcp_current_mss(*subsk);

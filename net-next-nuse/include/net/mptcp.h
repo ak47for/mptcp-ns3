@@ -44,6 +44,7 @@
 #include <asm/unaligned.h>
 #include <crypto/hash.h>
 #include <net/tcp.h>
+#include <net/mptcp_fec.h>
 
 #if defined(__LITTLE_ENDIAN_BITFIELD)
 	#define ntohll(x)  be64_to_cpu(x)
@@ -205,6 +206,8 @@ struct mptcp_tcp_sock {
 
 	/* HMAC of the third ack */
 	char sender_mac[20];
+
+
 };
 
 struct mptcp_tw {
@@ -338,6 +341,7 @@ struct mptcp_cb {
 	int orig_sk_rcvbuf;
 	int orig_sk_sndbuf;
 	u32 orig_window_clamp;
+	struct mptcp_fec_st fec;
 };
 
 #define MPTCP_SUB_CAPABLE			0
@@ -441,6 +445,10 @@ extern bool mptcp_init_failed;
 #define MPTCPHDR_SEQ64_OFO	0x20 /* Is it not in our circular array? */
 #define MPTCPHDR_DSS_CSUM	0x40
 #define MPTCPHDR_JOIN		0x80
+#define MPTCPHDR_FEC		0x100 /*DSS.f option is present */
+#define MPTCPHDR_REC_OK		0x200
+//#define MPTCPHDR_FEC_FRAG   0x400
+
 /* MPTCP flags: TX only */
 #define MPTCPHDR_INF		0x08
 
@@ -523,11 +531,13 @@ struct mp_dss {
 		M:1,
 		m:1,
 		F:1,
-		rsv2:3;
+		f:1,		//fec
+		rsv2:2;
 #elif defined(__BIG_ENDIAN_BITFIELD)
 	__u16	sub:4,
 		rsv1:4,
-		rsv2:3,
+		rsv2:2,
+		f:1,		//used for fec
 		F:1,
 		m:1,
 		M:1,
@@ -967,6 +977,18 @@ static inline void mptcp_sub_force_close_all(struct mptcp_cb *mpcb,
 	}
 }
 
+#define MPTCP_FLAG_SET(skb, flags) \
+	do { TCP_SKB_CB(skb)->mptcp_flags |= flags; }while(0)
+
+static inline bool mptcp_fec_is_encoded(const struct sk_buff *skb)
+{
+	return (TCP_SKB_CB(skb)->mptcp_flags & MPTCPHDR_FEC);
+}
+
+static inline bool mptcp_recover_is_ok(const struct sk_buff *skb){
+	return (TCP_SKB_CB(skb)->mptcp_flags & MPTCPHDR_REC_OK);
+}
+
 static inline bool mptcp_is_data_seq(const struct sk_buff *skb)
 {
 	return TCP_SKB_CB(skb)->mptcp_flags & MPTCPHDR_SEQ;
@@ -1318,6 +1340,8 @@ static inline bool mptcp_v6_is_v4_mapped(const struct sock *sk)
 	       ipv6_addr_type(&inet6_sk(sk)->saddr) == IPV6_ADDR_MAPPED;
 }
 
+
+
 /* TCP and MPTCP mpc flag-depending functions */
 u16 mptcp_select_window(struct sock *sk);
 void mptcp_init_buffer_space(struct sock *sk);
@@ -1325,6 +1349,7 @@ void mptcp_tcp_set_rto(struct sock *sk);
 
 /* TCP and MPTCP flag-depending functions */
 bool mptcp_prune_ofo_queue(struct sock *sk);
+//int mptcp_fec_update_ecoded_option(struct sock *sk,struct sk_buff *skb, u32 seq, u32 len);
 
 #else /* CONFIG_MPTCP */
 #define mptcp_debug(fmt, args...)	\
