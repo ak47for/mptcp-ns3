@@ -1,0 +1,1 @@
+cmd_net/netlink/builtin.o := mkdir -p ./net/netlink/; rm -f ./net/netlink/builtin.o; if test -n "./net/netlink/af_netlink.o ./net/netlink/genetlink.o"; then for f in ./net/netlink/af_netlink.o ./net/netlink/genetlink.o; do ar Tcru net/netlink/builtin.o $$f; done; else ar Tcru net/netlink/builtin.o; fi

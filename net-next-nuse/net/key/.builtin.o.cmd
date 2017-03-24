@@ -1,0 +1,1 @@
+cmd_net/key/builtin.o := mkdir -p ./net/key/; rm -f ./net/key/builtin.o; if test -n "./net/key/af_key.o"; then for f in ./net/key/af_key.o; do ar Tcru net/key/builtin.o $$f; done; else ar Tcru net/key/builtin.o; fi

@@ -1,0 +1,1 @@
+cmd_net/packet/builtin.o := mkdir -p ./net/packet/; rm -f ./net/packet/builtin.o; if test -n "./net/packet/af_packet.o"; then for f in ./net/packet/af_packet.o; do ar Tcru net/packet/builtin.o $$f; done; else ar Tcru net/packet/builtin.o; fi

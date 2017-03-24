@@ -1,0 +1,1 @@
+cmd_net/8021q/builtin.o := mkdir -p ./net/8021q/; rm -f ./net/8021q/builtin.o; if test -n "./net/8021q/vlan_core.o"; then for f in ./net/8021q/vlan_core.o; do ar Tcru net/8021q/builtin.o $$f; done; else ar Tcru net/8021q/builtin.o; fi

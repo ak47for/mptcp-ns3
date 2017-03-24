@@ -1,0 +1,1 @@
+cmd_net/unix/builtin.o := mkdir -p ./net/unix/; rm -f ./net/unix/builtin.o; if test -n "./net/unix/af_unix.o ./net/unix/garbage.o ./net/unix/sysctl_net_unix.o"; then for f in ./net/unix/af_unix.o ./net/unix/garbage.o ./net/unix/sysctl_net_unix.o; do ar Tcru net/unix/builtin.o $$f; done; else ar Tcru net/unix/builtin.o; fi

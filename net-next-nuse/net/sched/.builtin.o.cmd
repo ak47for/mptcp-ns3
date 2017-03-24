@@ -1,0 +1,1 @@
+cmd_net/sched/builtin.o := mkdir -p ./net/sched/; rm -f ./net/sched/builtin.o; if test -n "./net/sched/sch_generic.o ./net/sched/sch_mq.o"; then for f in ./net/sched/sch_generic.o ./net/sched/sch_mq.o; do ar Tcru net/sched/builtin.o $$f; done; else ar Tcru net/sched/builtin.o; fi
