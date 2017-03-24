@@ -680,7 +680,8 @@ bool mptcp_write_xmit(struct sock *meta_sk, unsigned int mss_now, int nonagle,
 	__u32 path_mask = 0;
 	struct sk_buff_head *fec_head;
 
-	fskb = mptcp_fec_create(meta_sk, &meta_sk->sk_write_queue);
+	if(meta_tp->mpcb->fec.type > 0)
+		fskb = mptcp_fec_create(meta_sk, &meta_sk->sk_write_queue);
 	if(fskb)
 		skb_queue_fec(mpcb, NULL, fskb);
 

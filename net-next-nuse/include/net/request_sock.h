@@ -66,6 +66,7 @@ struct request_sock {
 	struct sock			*sk;
 	u32				secid;
 	u32				peer_secid;
+	u8				mptcp_fec_type;
 };
 
 static inline struct request_sock *

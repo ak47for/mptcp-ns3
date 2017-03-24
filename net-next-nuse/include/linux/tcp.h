@@ -115,6 +115,7 @@ struct tcp_out_options {
 	u16	remove_addrs;	/* list of address id */
 	u8	addr_id;	/* address id (mp_join or add_address) */
 #endif /* CONFIG_MPTCP */
+	u8 mptcp_fec_type;
 };
 
 /*These are used to set the sack_ok field in struct tcp_options_received */
@@ -138,6 +139,7 @@ struct tcp_options_received {
 	u8	num_sacks;	/* Number of SACK blocks		*/
 	u16	user_mss;	/* mss requested by user in ioctl	*/
 	u16	mss_clamp;	/* Maximal mss, negotiated at connection setup */
+	u8 	mptcp_fec_type;
 };
 
 struct mptcp_cb;
@@ -408,6 +410,7 @@ struct tcp_sock {
 	u32		mptcp_loc_token;
 	u64		mptcp_loc_key;
 #endif /* CONFIG_MPTCP */
+	u8 		mptcp_fec_type;
 };
 
 enum tsq_flags {

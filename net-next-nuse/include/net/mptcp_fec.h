@@ -3,6 +3,7 @@
 
 #define FEC_RCV_QUEUE_LIMIT 131072		//128k
 #define DEFAULT_MSS_NUM 5	//5*mss
+#define MPTCP_FEC_NUM_TYPES 5
 
 #define MPTCP_FEC_DEBUG(FMT, args...) \
 	do{ if(1) printk("%-25s():%-5d "FMT"", __FUNCTION__, __LINE__, ##args); }while(0)
@@ -45,5 +46,11 @@ extern void free_fec_skb(struct sock *meta_sk, struct sk_buff *skb);
 
 extern void print_data(char *data, u32 len);
 extern int check_data_is_ok(char *dec_data, u32 len, struct sk_buff *skb);
+
+static inline bool mptcp_fec_is_enabled(const struct tcp_sock *tp)
+{
+	return unlikely(tp->mptcp_fec_type > 0);
+}
+
 #endif
 

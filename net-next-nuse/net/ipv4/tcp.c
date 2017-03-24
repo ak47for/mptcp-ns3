@@ -2675,6 +2675,13 @@ static int do_tcp_setsockopt(struct sock *sk, int level,
 		else
 			mptcp_disable_sock(sk);
 		break;
+	case MPTCP_FEC:
+		if (sysctl_mptcp_fec && val >= 0 && val < MPTCP_FEC_NUM_TYPES) {
+			tp->mptcp_fec_type = val;
+		}
+		else
+			err = -EINVAL;
+		break;
 #endif
 	default:
 		err = -ENOPROTOOPT;
@@ -2942,6 +2949,10 @@ static int do_tcp_getsockopt(struct sock *sk, int level,
 		val = sock_flag(sk, SOCK_MPTCP) ? 1 : 0;
 		break;
 #endif
+	case MPTCP_FEC:
+		val = tp->mptcp_fec_type;
+		break;
+
 	default:
 		return -ENOPROTOOPT;
 	}

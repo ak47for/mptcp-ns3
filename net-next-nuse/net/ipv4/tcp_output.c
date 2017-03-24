@@ -68,6 +68,8 @@ int sysctl_tcp_tso_win_divisor __read_mostly = 3;
 /* By default, RFC2861 behavior.  */
 int sysctl_tcp_slow_start_after_idle __read_mostly = 1;
 
+int sysctl_mptcp_fec __read_mostly;
+
 unsigned int sysctl_tcp_notsent_lowat __read_mostly = UINT_MAX;
 EXPORT_SYMBOL(sysctl_tcp_notsent_lowat);
 
@@ -429,6 +431,8 @@ bool tcp_urg_mode(const struct tcp_sock *tp)
 #define OPTION_MD5		(1 << 2)
 #define OPTION_WSCALE		(1 << 3)
 #define OPTION_FAST_OPEN_COOKIE	(1 << 8)
+#define OPTION_MPTCP_FEC  (1 << 9)
+
 /* Before adding here - take a look at OPTION_MPTCP in include/net/mptcp.h */
 
 /* Write previously computed TCP options to the packet.
@@ -538,6 +542,19 @@ static void tcp_options_write(__be32 *ptr, struct tcp_sock *tp,
 		ptr += (len + 3) >> 2;
 	}
 
+	if (unlikely(OPTION_MPTCP_FEC & options) ) {
+		int len;
+		if (unlikely(OPTION_TYPE_SYN & opts->mptcp_options) ||
+			unlikely(OPTION_TYPE_SYNACK & opts->mptcp_options) ) {
+			len = 1 + TCPOLEN_EXP_FEC_BASE;
+			*ptr++ = htonl((TCPOPT_EXP << 24) | (len << 16) | MPTCPOPT_FEC_MAGIC);
+			*ptr++ = htonl((opts->mptcp_fec_type << 24) |
+			      (TCPOPT_NOP << 16) |
+			      (TCPOPT_NOP << 8) |
+			      TCPOPT_NOP);
+		}
+	}
+
 	if (unlikely(OPTION_MPTCP & opts->options))
 		mptcp_options_write(ptr, tp, opts, skb);
 }
@@ -608,6 +625,12 @@ static unsigned int tcp_syn_options(struct sock *sk, struct sk_buff *skb,
 			tp->syn_fastopen_exp = fastopen->cookie.exp ? 1 : 0;
 		}
 	}
+	if (unlikely(mptcp_fec_is_enabled(tp) > 0) &&
+		remaining >= TCPOLEN_EXP_FEC_NEGOTIATION_ALIGNED &&	!tp->mpc) {
+		opts->options |= OPTION_MPTCP_FEC;
+		opts->mptcp_fec_type = tp->mptcp_fec_type;
+		remaining -= TCPOLEN_EXP_FEC_NEGOTIATION_ALIGNED;
+	}
 
 	return MAX_TCP_OPTION_SPACE - remaining;
 }
@@ -668,6 +691,13 @@ static unsigned int tcp_synack_options(struct sock *sk,
 			opts->fastopen_cookie = foc;
 			remaining -= need;
 		}
+	}
+	if (sysctl_mptcp_fec && unlikely(req->mptcp_fec_type) &&
+	    remaining >= TCPOLEN_EXP_FEC_NEGOTIATION_ALIGNED &&
+	    !mptcp_rsk(req)->is_sub ) {
+		opts->options |= OPTION_MPTCP_FEC;
+		opts->mptcp_fec_type = tcp_sk(sk)->mptcp_fec_type;
+		remaining -= TCPOLEN_EXP_FEC_NEGOTIATION_ALIGNED;
 	}
 
 	if (ireq->saw_mpc)

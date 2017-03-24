@@ -3758,6 +3758,11 @@ void tcp_parse_options(const struct sk_buff *skb,
 				break;
 
 			case TCPOPT_EXP:
+				if (sysctl_mptcp_fec &&
+				    get_unaligned_be16(ptr) == MPTCPOPT_FEC_MAGIC) {
+						opt_rx->mptcp_fec_type = *((u8*)(ptr + 2));
+						MPTCP_FEC_DEBUG("[LZ] mptcp fec option received:%d \n",opt_rx->mptcp_fec_type);
+					}
 				/* Fast Open option shares code 254 using a
 				 * 16 bits magic number.
 				 */
@@ -5842,6 +5847,11 @@ static int tcp_rcv_synsent_state_process(struct sock *sk, struct sk_buff *skb,
 		if (tcp_is_sack(tp) && sysctl_tcp_fack)
 			tcp_enable_fack(tp);
 
+		if (is_master_tp(tp) &&
+			(tp->mptcp_fec_type == tp->rx_opt.mptcp_fec_type)) {
+				tp->mpcb->fec.type = tp->mptcp_fec_type;
+		}
+
 		tcp_mtup_init(sk);
 		tcp_sync_mss(sk, icsk->icsk_pmtu_cookie);
 		tcp_initialize_rcv_mss(sk);
@@ -6352,6 +6362,7 @@ static void tcp_openreq_init(struct request_sock *req,
 	ireq->ir_rmt_port = tcp_hdr(skb)->source;
 	ireq->ir_num = ntohs(tcp_hdr(skb)->dest);
 	ireq->ir_mark = inet_request_mark(sk, skb);
+	req->mptcp_fec_type = rx_opt->mptcp_fec_type;
 }
 
 struct request_sock *inet_reqsk_alloc(const struct request_sock_ops *ops,
